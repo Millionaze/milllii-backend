@@ -64,7 +64,7 @@ logging.basicConfig(
 
 # MongoDB connection with optimized settings for performance
 client = AsyncIOMotorClient(
-    "mongodb+srv://irfan_atlas_001:2A2mYw1Cp5LQAcia@cluster0.ct21ouz.mongodb.net/?appName=Cluster0",
+    "mongodb+srv://irfan_atlas_001:sA2cUm5tialL3Gll@cluster0.ct21ouz.mongodb.net/?appName=Cluster0",
     maxPoolSize=50,  # Increased from default 100 to handle more concurrent connections
     minPoolSize=10,  # Keep 10 connections ready
     maxIdleTimeMS=45000,  # Close idle connections after 45 seconds
