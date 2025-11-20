@@ -64,7 +64,7 @@ logging.basicConfig(
 
 # MongoDB connection with optimized settings for performance
 client = AsyncIOMotorClient(
-    "mongodb+srv://irfan_atlas_001:sA2cUm5tialL3Gll@cluster0.ct21ouz.mongodb.net/?appName=Cluster0",
+    "mongodb+srv://irfan_atlas_001:2A2mYw1Cp5LQAcia@cluster0.ct21ouz.mongodb.net/?appName=Cluster0",
     maxPoolSize=50,  # Increased from default 100 to handle more concurrent connections
     minPoolSize=10,  # Keep 10 connections ready
     maxIdleTimeMS=45000,  # Close idle connections after 45 seconds
@@ -1169,6 +1169,50 @@ def encrypt_data(data: str) -> str:
 def decrypt_data(encrypted_data: str) -> str:
     """Decrypt sensitive data"""
     return cipher_suite.decrypt(encrypted_data.encode()).decode()
+
+
+async def get_user_effective_permissions(user: User) -> Dict[str, bool]:
+    """
+    Get effective permissions for a user by combining role permissions with user overrides.
+    Returns a dictionary of permission flags.
+    """
+    user_role = user.role
+    
+    # Get role-level permissions from database
+    role_config = await db.role_configs.find_one({"role": user_role}, {"_id": 0})
+    
+    if role_config:
+        role_permissions = role_config["permissions"]
+    else:
+        # Use default permissions if no custom config exists
+        default_perms = DEFAULT_ROLE_PERMISSIONS.get(
+            user_role, DEFAULT_ROLE_PERMISSIONS["user"]
+        )
+        role_permissions = default_perms.model_dump() if hasattr(default_perms, "model_dump") else dict(default_perms)
+    
+    # Start with role permissions
+    effective_permissions = role_permissions.copy() if isinstance(role_permissions, dict) else dict(role_permissions)
+    
+    # Apply user-specific overrides if they exist
+    if user.permission_overrides:
+        effective_permissions.update(user.permission_overrides)
+    
+    return effective_permissions
+
+
+async def user_has_permission(user: User, permission: str) -> bool:
+    """
+    Check if a user has a specific permission.
+    
+    Args:
+        user: User object
+        permission: Permission name (e.g., 'can_have_direct_chat', 'can_chat_with_millii')
+    
+    Returns:
+        True if user has the permission, False otherwise
+    """
+    effective_permissions = await get_user_effective_permissions(user)
+    return effective_permissions.get(permission, False)
 
 
 def get_frontend_url() -> str:
@@ -8031,8 +8075,16 @@ async def get_project_status(
 @api_router.get("/channels")
 async def get_channels(current_user: User = Depends(get_current_user)):
     """Get all channels organized by category (Company, Project, DM)"""
-    # Clients only see project channels they're part of
-    if current_user.role == "client":
+    # Check if user has permission for direct chat
+    has_direct_chat_permission = await user_has_permission(current_user, "can_have_direct_chat")
+    
+    logging.info(f"🔍 DEBUG: User {current_user.id} ({current_user.role}) requesting channels")
+    logging.info(f"🔍 DEBUG: User has_direct_chat_permission = {has_direct_chat_permission}")
+    logging.info(f"🔍 DEBUG: User permission_overrides = {current_user.permission_overrides}")
+    
+    # Build query based on permissions
+    if current_user.role == "client" and not has_direct_chat_permission:
+        # Clients without direct chat permission only see project channels
         channels = await db.channels.find(
             {
                 "members": current_user.id,
@@ -8041,15 +8093,30 @@ async def get_channels(current_user: User = Depends(get_current_user)):
             {"_id": 0},
         ).to_list(length=None)
         logging.info(
-            f"Client user {current_user.id} ({current_user.role}) fetching channels, found {len(channels)} project channels"
+            f"Client user {current_user.id} ({current_user.role}) without direct chat permission fetching channels, found {len(channels)} project channels"
+        )
+    elif current_user.role == "client" and has_direct_chat_permission:
+        # Clients with direct chat permission see project and direct channels, but not company/team channels
+        channels = await db.channels.find(
+            {
+                "members": current_user.id,
+                "type": {"$in": ["project", "direct"]},
+            },
+            {"_id": 0},
+        ).to_list(length=None)
+        logging.info(
+            f"Client user {current_user.id} ({current_user.role}) with direct chat permission fetching channels, found {len(channels)} channels"
         )
     else:
         # Team members (including 'user' role), managers, and admins see all channels they're members of
-        channels = await db.channels.find(
-            {"members": current_user.id}, {"_id": 0}
-        ).to_list(length=None)
+        # However, if they don't have direct chat permission, filter out direct channels
+        query = {"members": current_user.id}
+        if not has_direct_chat_permission:
+            query["type"] = {"$ne": "direct"}  # Exclude direct channels
+        
+        channels = await db.channels.find(query, {"_id": 0}).to_list(length=None)
         logging.info(
-            f"Team member {current_user.id} fetching channels, found {len(channels)} channels"
+            f"Team member {current_user.id} fetching channels (direct_chat_enabled={has_direct_chat_permission}), found {len(channels)} channels"
         )
 
     # Filter project channels based on project status (active, not completed, not archived)
@@ -8180,6 +8247,15 @@ async def send_channel_message(
     channel = await db.channels.find_one({"id": channel_id}, {"_id": 0})
     if not channel or current_user.id not in channel.get("members", []):
         raise HTTPException(status_code=403, detail="Not a member of this channel")
+    
+    # Check if this is a direct message channel and user has permission
+    if channel.get("type") == "direct":
+        has_direct_chat_permission = await user_has_permission(current_user, "can_have_direct_chat")
+        if not has_direct_chat_permission:
+            raise HTTPException(
+                status_code=403,
+                detail="You don't have permission to send direct messages. Please contact your administrator."
+            )
 
     # Check channel permissions
     channel_permissions = channel.get("permissions", {})
@@ -8278,6 +8354,15 @@ async def get_channel_messages(
     channel = await db.channels.find_one({"id": channel_id}, {"_id": 0})
     if not channel or current_user.id not in channel.get("members", []):
         raise HTTPException(status_code=403, detail="Not a member of this channel")
+    
+    # Check if this is a direct message channel and user has permission
+    if channel.get("type") == "direct":
+        has_direct_chat_permission = await user_has_permission(current_user, "can_have_direct_chat")
+        if not has_direct_chat_permission:
+            raise HTTPException(
+                status_code=403,
+                detail="You don't have permission to access direct messages. Please contact your administrator."
+            )
 
     query = {"channel_id": channel_id}
     if before:
@@ -8656,6 +8741,15 @@ async def get_or_create_direct_channel(
     user_id: str, current_user: User = Depends(get_current_user)
 ):
     """Get or create a direct message channel with another user"""
+    # Check if current user has permission for direct chat
+    has_direct_chat_permission = await user_has_permission(current_user, "can_have_direct_chat")
+    
+    if not has_direct_chat_permission:
+        raise HTTPException(
+            status_code=403,
+            detail="You don't have permission to create or access direct message channels. Please contact your administrator."
+        )
+    
     # Check if DM channel already exists
     channel = await db.channels.find_one(
         {"type": "direct", "members": {"$all": [current_user.id, user_id]}}, {"_id": 0}
@@ -8668,6 +8762,16 @@ async def get_or_create_direct_channel(
     other_user = await db.users.find_one({"id": user_id}, {"_id": 0})
     if not other_user:
         raise HTTPException(status_code=404, detail="User not found")
+    
+    # Also check if the other user has direct chat permission
+    other_user_obj = User(**other_user)
+    other_has_permission = await user_has_permission(other_user_obj, "can_have_direct_chat")
+    
+    if not other_has_permission:
+        raise HTTPException(
+            status_code=403,
+            detail=f"{other_user['name']} doesn't have permission to use direct messages."
+        )
 
     # Create new DM channel
     channel_data = ChannelCreate(
@@ -8676,12 +8780,17 @@ async def get_or_create_direct_channel(
         members=[current_user.id, user_id],
     )
 
-    channel = Channel(**channel_data.model_dump(), created_by=current_user.id)
-    await db.channels.insert_one(channel.model_dump())
+    # Exclude None values so the Channel model can generate default values (like slug)
+    channel = Channel(**channel_data.model_dump(exclude_none=True), created_by=current_user.id)
+    channel_dict = channel.model_dump()
+    await db.channels.insert_one(channel_dict)
 
     # Notify both users
+    logging.info(
+        f"Created direct channel between {current_user.name} and {other_user['name']}"
+    )
 
-    return channel
+    return channel_dict
 
 
 # ============ NEW CHANNEL MANAGEMENT ENDPOINTS ============
