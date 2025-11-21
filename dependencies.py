@@ -16,7 +16,7 @@ from config import settings
 
 # MongoDB connection with optimized settings
 client = AsyncIOMotorClient(
-   "mongodb://localhost:27017",
+   "mongodb+srv://abqureshi516_db_user:alDrMaWlwfZZO5VK@cluster0.x6j8drc.mongodb.net/?appName=Cluster0",
     maxPoolSize=50,
     minPoolSize=10,
     maxIdleTimeMS=45000,
